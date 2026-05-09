@@ -1010,6 +1010,12 @@ body.is-touch #hud.active ~ #touch-controls { display: block; }
   #game { touch-action: none; }
 }
 </style>
+<style>
+.ha-img-placeholder{display:flex;align-items:center;justify-content:center;flex-direction:column;gap:6px;background:#f4f4f5;border:1px dashed #d4d4d8;border-radius:8px;color:#71717a;font-size:12px;font-family:system-ui,sans-serif;min-height:80px;padding:16px;box-sizing:border-box;animation:ha-img-pulse 1.5s ease-in-out infinite}
+.ha-img-placeholder.ha-failed{animation:none;opacity:.7}
+@keyframes ha-img-pulse{0%,100%{opacity:1}50%{opacity:.5}}
+@media(prefers-color-scheme:dark){.ha-img-placeholder{background:#27272a;border-color:#3f3f46;color:#a1a1aa}}
+</style>
 </head>
 <body>
 <div id="stage">
@@ -1093,8 +1099,8 @@ body.is-touch #hud.active ~ #touch-controls { display: block; }
     <button class="touch-btn" id="tb-pulse" aria-label="Pulse">Q<small>PULSE</small></button>
     <button class="touch-btn" id="tb-dash" aria-label="Dash">⮕<small>DASH</small></button>
     <div id="touch-hint">
-      <span>◐ Drag left to thrust</span>
-      <span>◑ Hold right to attest</span>
+      <span>👆 Drag anywhere to thrust</span>
+      <span>🍊 Auto-aim engaged</span>
     </div>
   </div>
 
@@ -1654,29 +1660,20 @@ class InputManager {
 
     canvas.addEventListener('touchstart', (e) => {
       e.preventDefault();
-      const r = canvas.getBoundingClientRect();
-      const half = r.width / 2;
+      // Mobile is one-thumb: any canvas touch becomes the movement joystick.
+      // Aim + fire are fully automatic, so the second hand never has to
+      // cover the screen. Dash/Pulse/Pause are separate DOM buttons.
       for (const t of e.changedTouches) {
+        if (this.touch.moveActive) continue;   // first touch wins
         const p = localCoords(t);
-        if (p.x < half && !this.touch.moveActive) {
-          this.touch.moveActive = true;
-          this.touch.moveId = t.identifier;
-          this.touch.moveOriginX = p.x;
-          this.touch.moveOriginY = p.y;
-          this.touch.moveX = p.x;
-          this.touch.moveY = p.y;
-          this.touch.moveDx = 0;
-          this.touch.moveDy = 0;
-        } else if (p.x >= half && !this.touch.aimActive) {
-          this.touch.aimActive = true;
-          this.touch.aimId = t.identifier;
-          this.touch.aimX = p.x;
-          this.touch.aimY = p.y;
-          this.touch.shooting = true;
-          // Mouse position also gets set so any mouse-based aim code stays consistent
-          this.mouse.x = p.x;
-          this.mouse.y = p.y;
-        }
+        this.touch.moveActive = true;
+        this.touch.moveId = t.identifier;
+        this.touch.moveOriginX = p.x;
+        this.touch.moveOriginY = p.y;
+        this.touch.moveX = p.x;
+        this.touch.moveY = p.y;
+        this.touch.moveDx = 0;
+        this.touch.moveDy = 0;
       }
     }, opts);
 
@@ -2179,9 +2176,37 @@ class Player extends Entity {
   update(dt) {
     const i = this.game.input;
 
-    // Aim — touch right-stick wins; otherwise mouse position
+    // Mobile uses ONE-THUMB controls: left thumb steers via the joystick,
+    // aim + fire are fully automatic so the second hand isn't blocking
+    // the screen. Desktop keeps mouse-aim + click-to-fire.
+    const isTouchMode = document.body.classList.contains('is-touch');
     let aimX, aimY;
-    if (i.touch.aimActive) {
+    let autoFire = false;
+    if (isTouchMode) {
+      const target = this.game.findNearestEnemy(this.x, this.y);
+      if (target) {
+        // Lead the target slightly so bullets meet a moving enemy
+        const bulletSpeed = 720;
+        const dx = target.x - this.x;
+        const dy = target.y - this.y;
+        const t = Math.hypot(dx, dy) / bulletSpeed;
+        aimX = target.x + target.vx * t * 0.5;
+        aimY = target.y + target.vy * t * 0.5;
+        this.lastAimX = aimX; this.lastAimY = aimY;
+        this.lastTarget = target;
+        autoFire = true;
+      } else {
+        // No target — face the direction of joystick movement, don't fire
+        if (i.touch.moveActive && (Math.abs(i.touch.moveDx) + Math.abs(i.touch.moveDy)) > 0.1) {
+          aimX = this.x + i.touch.moveDx * 200;
+          aimY = this.y + i.touch.moveDy * 200;
+        } else {
+          aimX = this.lastAimX || (this.x + 100);
+          aimY = this.lastAimY || this.y;
+        }
+        this.lastTarget = null;
+      }
+    } else if (i.touch.aimActive) {
       aimX = i.touch.aimX; aimY = i.touch.aimY;
     } else {
       aimX = i.mouse.x; aimY = i.mouse.y;
@@ -2263,8 +2288,8 @@ class Player extends Entity {
     // Bobbing
     this.bobPhase += dt * 6;
 
-    // Shooting — touch fire button OR mouse
-    if (i.touch.aimActive || i.mouse.down) {
+    // Shooting — touch auto-fire (mobile), aim-stick hold (legacy), or mouse
+    if (autoFire || i.touch.aimActive || i.mouse.down) {
       this.tryShoot(aimX, aimY);
     }
 
@@ -3384,6 +3409,44 @@ function drawJoystick(ctx, ox, oy, x, y) {
   ctx.restore();
 }
 
+// Auto-aim target ring — pulses around the enemy the player is shooting at.
+// Cream + brown (cartoon palette) so it pops against the orange world.
+function drawAutoTarget(ctx, enemy, t) {
+  const pulse = 0.5 + 0.5 * Math.sin(t * 4);
+  const r = enemy.r + 8 + pulse * 4;
+  ctx.save();
+  ctx.translate(enemy.x, enemy.y);
+  ctx.rotate(t * 0.8);
+  // Brown shadow ring
+  ctx.strokeStyle = '#5a2400';
+  ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.arc(0, 0, r, 0, TAU); ctx.stroke();
+  // Cream main ring
+  ctx.strokeStyle = '#fff4dc';
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(0, 0, r, 0, TAU); ctx.stroke();
+  // 4 tick marks rotating
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = '#5a2400';
+  for (let i = 0; i < 4; i++) {
+    const a = i / 4 * TAU;
+    ctx.beginPath();
+    ctx.moveTo(Math.cos(a) * r, Math.sin(a) * r);
+    ctx.lineTo(Math.cos(a) * (r + 7), Math.sin(a) * (r + 7));
+    ctx.stroke();
+  }
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = '#fff4dc';
+  for (let i = 0; i < 4; i++) {
+    const a = i / 4 * TAU;
+    ctx.beginPath();
+    ctx.moveTo(Math.cos(a) * r, Math.sin(a) * r);
+    ctx.lineTo(Math.cos(a) * (r + 7), Math.sin(a) * (r + 7));
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
 function drawReticle(ctx, x, y, t) {
   // Cream-on-brown cartoon reticle for max contrast on the bright orange world
   ctx.save();
@@ -3667,6 +3730,19 @@ class Game {
     this.entities.push(new PowerUp(this, x, y, type));
   }
 
+  // Find the closest live enemy to a given point — used by mobile auto-aim
+  findNearestEnemy(x, y) {
+    let best = null;
+    let bestD = Infinity;
+    for (const e of this.entities) {
+      if (e.dead) continue;
+      if (!(e instanceof Enemy)) continue;
+      const d = dist2(x, y, e.x, e.y);
+      if (d < bestD) { bestD = d; best = e; }
+    }
+    return best;
+  }
+
   onEnemyKilled(enemy) {
     this.kills++;
     // combo
@@ -3942,18 +4018,23 @@ class Game {
     // Floating text on top
     for (const t of this.floatingTexts) t.render(ctx);
 
-    // Reticle (mouse) or aim ring (touch)
+    // Reticle (mouse) — desktop only
+    // On mobile we draw a target indicator on the auto-aimed enemy and the
+    // movement joystick at the active touch point.
     if (this.state === STATE.PLAYING) {
       const t = performance.now() / 1000;
-      const touchMode = IS_TOUCH || this.input.touch.aimActive || this.input.touch.moveActive;
+      const touchMode = document.body.classList.contains('is-touch');
       if (touchMode) {
-        if (this.input.touch.aimActive) {
-          drawReticle(ctx, this.input.touch.aimX, this.input.touch.aimY, t);
-        }
+        // Movement joystick visualization
         if (this.input.touch.moveActive) {
           drawJoystick(ctx,
             this.input.touch.moveOriginX, this.input.touch.moveOriginY,
             this.input.touch.moveX, this.input.touch.moveY);
+        }
+        // Auto-aim target indicator — pulses around whatever the player is
+        // currently shooting at, so they can see where their bullets will go
+        if (this.player && this.player.lastTarget && !this.player.lastTarget.dead) {
+          drawAutoTarget(ctx, this.player.lastTarget, t);
         }
       } else {
         drawReticle(ctx, this.input.mouse.x, this.input.mouse.y, t);
@@ -4041,6 +4122,72 @@ window.addEventListener('DOMContentLoaded', () => {
   document.addEventListener('click', unlock);
   document.addEventListener('keydown', unlock);
 });
+</script>
+<script>
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape' && window.parent !== window) {
+    window.parent.postMessage({ type: 'close-fullscreen' }, '*');
+  }
+});
+</script>
+<!-- broken-img-handler -->
+<script>
+(function(){
+  if(window.__brokenImgHandler)return;
+  window.__brokenImgHandler=true;
+  var MAX=5,DELAYS=[2000,4000,8000,16000,32000];
+  document.addEventListener('error',function(e){
+    var img=e.target;
+    if(!img||img.tagName!=='IMG')return;
+    var liveSrc=img.getAttribute('src');
+    var src=img.dataset.haOriginalSrc||liveSrc;
+    if(!src)return;
+    if(img.dataset.haOriginalSrc&&liveSrc&&liveSrc!==img.dataset.haOriginalSrc&&liveSrc.indexOf('_r=')<0){src=liveSrc;img.dataset.haOriginalSrc=src;img.dataset.haRetryCount='0'}
+    else if(!img.dataset.haOriginalSrc){img.dataset.haOriginalSrc=src}
+    var attempt=parseInt(img.dataset.haRetryCount||'0',10);
+    if(img.dataset.haPhId){var old=document.getElementById(img.dataset.haPhId);if(old)old.remove()}
+    var ph=document.createElement('div');
+    ph.className='ha-img-placeholder'+(attempt>=MAX?' ha-failed':'');
+    ph.id='ha-ph-'+Math.random().toString(36).slice(2,9);
+    var w=img.getAttribute('width');var h=img.getAttribute('height');
+    if(w)ph.style.width=w+(isNaN(Number(w))?'':'px');
+    else if(img.style.width)ph.style.width=img.style.width;
+    else if(img.width>1)ph.style.width=img.width+'px';
+    if(h)ph.style.height=h+(isNaN(Number(h))?'':'px');
+    else if(img.style.height)ph.style.height=img.style.height;
+    else if(img.height>1)ph.style.height=img.height+'px';
+    ph.textContent=attempt>=MAX?'Image unavailable':'Loading image\u2026';
+    img.dataset.haPhId=ph.id;
+    if(img.dataset.haOrigDisplay==null)img.dataset.haOrigDisplay=img.style.display||'';
+    img.style.display='none';
+    img.insertAdjacentElement('afterend',ph);
+    if(attempt<MAX){
+      img.dataset.haRetryCount=String(attempt+1);
+      setTimeout(function(){
+        if(!img.isConnected)return;
+        if(img.dataset.haOriginalSrc!==src)return;
+        if(img.complete&&img.naturalWidth>0)return;
+        var curSrc=img.getAttribute('src');
+        if(curSrc&&curSrc.indexOf(src)!==0)return;
+        var fresh=src+(src.indexOf('?')>=0?'&':'?')+'_r='+(attempt+1)+'_'+Date.now();
+        img.src=fresh;
+      },DELAYS[attempt]);
+    }
+  },true);
+  document.addEventListener('load',function(e){
+    var img=e.target;
+    if(!img||img.tagName!=='IMG')return;
+    if(img.dataset.haPhId){
+      var ph=document.getElementById(img.dataset.haPhId);
+      if(ph)ph.remove();
+      delete img.dataset.haPhId;
+      img.style.display=img.dataset.haOrigDisplay||'';
+      delete img.dataset.haOrigDisplay;
+      delete img.dataset.haOriginalSrc;
+      delete img.dataset.haRetryCount;
+    }
+  },true);
+})();
 </script>
 </body>
 </html>
